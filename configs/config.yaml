@@ -1,0 +1,60 @@
+# =============================================================================
+#  MRI Tumor Localization - central configuration
+#  Every tunable value of the pipeline lives here. Scripts read this file
+#  (or another one passed with --config) so experiments never require code edits.
+# =============================================================================
+
+paths:
+  raw_dir: data/raw                  # downloaded NIfTI volumes, one folder per patient
+  metadata_file: data/metadata/UTSW_Glioma_Metadata.tsv   # clinical / acquisition metadata
+  processed_dir: data/processed      # cached 2D slices (.npz), index.csv, splits.json
+  output_dir: outputs                # checkpoints, logs, figures, metrics
+
+download:
+  # Public Faspex (IBM Aspera) link published by TCIA for the UTSW-Glioma collection
+  faspex_url: "https://faspex.cancerimagingarchive.net/?context=eyJyZXNvdXJjZSI6InBhY2thZ2VzIiwidHlwZSI6ImV4dGVybmFsX2Rvd25sb2FkX3BhY2thZ2UiLCJpZCI6IjEyNjUiLCJwYXNzY29kZSI6IjM0MzA0NTU2NTgxNDA0ZjYyZTU1ODcwNWI4NjYyZWFjYjlkZGZiNjUiLCJwYWNrYWdlX2lkIjoiMTI2NSIsImVtYWlsIjoiaGVscEBjYW5jZXJpbWFnaW5nYXJjaGl2ZS5uZXQifQ=="
+  metadata_url: "https://www.cancerimagingarchive.net/wp-content/uploads/UTSW_Glioma_Metadata-2-1.tsv"
+  package_root: /UTSW-Glioma         # top-level folder inside the Aspera package
+  parallel_downloads: 4              # patients downloaded concurrently (each Aspera session has ~10s setup overhead)
+
+data:
+  num_patients: 150                  # how many patients (sorted by ID) to download / use
+  modality: brain_flair              # skull-stripped input image: brain_flair | brain_t1 | brain_t1ce | brain_t2
+  manual_seg: rtumorseg_manual_correction   # neuroradiologist-refined mask (in image space)
+  fallback_seg: tumorseg_FeTS        # automatic mask used when no manual mask exists
+  image_size: 128                    # slices are resized to image_size x image_size
+  min_brain_fraction: 0.05           # skip slices where < 5% of pixels are brain (top/bottom of head)
+  min_tumor_pixels: 50               # tumor area (in original 240x240 pixels) needed to call a slice "positive"
+  neg_pos_ratio: 1.0                 # tumor-free slices kept per tumor slice (class balance)
+  split: [0.70, 0.15, 0.15]          # train / validation / test fractions, split BY PATIENT
+  seed: 42                           # controls patient split and negative-slice sampling
+
+model:
+  backbone: resnet18                 # torchvision backbone (resnet18 ~11M params, laptop friendly)
+  pretrained: true                   # start from ImageNet weights (converges much faster)
+  dropout: 0.2                       # dropout before the prediction heads
+
+train:
+  epochs: 25                         # maximum number of epochs
+  batch_size: 32
+  lr: 0.0003                         # AdamW learning rate
+  weight_decay: 0.0001               # AdamW weight decay
+  patience: 6                        # early stopping: epochs without val improvement before stopping
+  num_workers: 0                     # DataLoader workers (0 is safest/fastest on macOS for in-memory data)
+  log_interval: 20                   # print running loss every N batches
+  cls_loss_weight: 1.0               # weight of the "is there a tumor?" loss
+  box_l1_weight: 5.0                 # weight of the SmoothL1 box-coordinate loss
+  box_giou_weight: 2.0               # weight of the GIoU box-overlap loss
+  cls_threshold: 0.5                 # probability above which a slice is predicted to contain a tumor
+  device: auto                       # auto | mps | cuda | cpu
+
+augment:
+  hflip_prob: 0.5                    # probability of a left-right flip (brain is roughly symmetric)
+  max_rotation_deg: 10               # random rotation range (+/- degrees)
+  max_scale: 0.10                    # random zoom range (+/- 10%)
+  max_translate: 0.05                # random shift as a fraction of image size
+  intensity_jitter: 0.10             # random brightness/contrast change (+/- 10%)
+
+evaluate:
+  num_figures: 4                     # number of prediction-grid figures to save
+  images_per_figure: 16              # slices per figure (4x4 grid)

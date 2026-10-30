@@ -1,0 +1,16 @@
+# Data and generated artifacts (large / license-bound; reproducible with the scripts)
+data/
+outputs/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.ipynb_checkpoints/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
