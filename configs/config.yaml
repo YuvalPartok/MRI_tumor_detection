@@ -24,22 +24,26 @@ data:
   fallback_seg: tumorseg_FeTS        # automatic mask used when no manual mask exists
   image_size: 128                    # slices are resized to image_size x image_size
   min_brain_fraction: 0.05           # skip slices where < 5% of pixels are brain (top/bottom of head)
-  min_tumor_pixels: 50               # tumor area (in original 240x240 pixels) needed to call a slice "positive"
-  neg_pos_ratio: 1.0                 # tumor-free slices kept per tumor slice (class balance)
+  min_tumor_pixels: 1                # tumor area (in original 240x240 pixels) needed to call a slice "positive" (1 = every tumor slice)
+  neg_pos_ratio: null                # tumor-free slices kept per tumor slice; null = keep ALL tumor-free slices
   split: [0.70, 0.15, 0.15]          # train / validation / test fractions, split BY PATIENT
   seed: 42                           # controls patient split and negative-slice sampling
 
 model:
   backbone: resnet18                 # torchvision backbone (resnet18 ~11M params, laptop friendly)
   pretrained: true                   # start from ImageNet weights (converges much faster)
-  dropout: 0.2                       # dropout before the prediction heads
+  dropout: 0.5                       # dropout before the prediction heads (strong, the head is the part that overfits)
 
 train:
-  epochs: 25                         # maximum number of epochs
+  epochs: 30                         # number of epochs (the cosine learning-rate schedule spans all of them)
   batch_size: 32
-  lr: 0.0003                         # AdamW learning rate
-  weight_decay: 0.0001               # AdamW weight decay
-  patience: 6                        # early stopping: epochs without val improvement before stopping
+  lr: 0.0003                         # AdamW learning rate of the new layers (neck + heads)
+  backbone_lr_mult: 0.2              # pretrained backbone learns 5x slower -> stays close to its general ImageNet features
+  weight_decay: 0.05                 # AdamW weight decay (L2-style regularization)
+  label_smoothing: 0.05              # soften 0/1 tumor labels to 0.025/0.975 -> discourages over-confident predictions
+  warmup_epochs: 2                   # linear learning-rate warm-up before the cosine decay
+  patience: 30                       # early stopping patience in epochs (>= epochs disables it: the cosine schedule
+                                     # needs its low-LR tail; the best checkpoint is kept regardless)
   num_workers: 0                     # DataLoader workers (0 is safest/fastest on macOS for in-memory data)
   log_interval: 20                   # print running loss every N batches
   cls_loss_weight: 1.0               # weight of the "is there a tumor?" loss
@@ -50,10 +54,13 @@ train:
 
 augment:
   hflip_prob: 0.5                    # probability of a left-right flip (brain is roughly symmetric)
-  max_rotation_deg: 10               # random rotation range (+/- degrees)
-  max_scale: 0.10                    # random zoom range (+/- 10%)
-  max_translate: 0.05                # random shift as a fraction of image size
-  intensity_jitter: 0.10             # random brightness/contrast change (+/- 10%)
+  max_rotation_deg: 15               # random rotation range (+/- degrees)
+  max_scale: 0.15                    # random zoom range (+/- 15%)
+  max_translate: 0.08                # random shift as a fraction of image size
+  intensity_jitter: 0.15             # random brightness/contrast change (+/- 15%)
+  max_gamma: 0.3                     # random gamma correction in [1-0.3, 1+0.3] (non-linear contrast change)
+  noise_std: 0.03                    # std of additive Gaussian noise (simulates scanner noise)
+  blur_prob: 0.2                     # probability of a slight Gaussian blur (simulates lower resolution scans)
 
 evaluate:
   num_figures: 4                     # number of prediction-grid figures to save

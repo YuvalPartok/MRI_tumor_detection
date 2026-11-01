@@ -41,13 +41,51 @@ def evaluate(cfg: Config, checkpoint: Path | None = None) -> dict[str, float]:
         print(f"  {k:<14}: {v:.4f}")
     print("=" * 60)
 
+    by_size = metrics_by_tumor_size(test_ds, out, cfg.train.cls_threshold)
+    print("By tumor size (tumor area in the 128x128 slice):")
+    print(f"  {'size':<22}{'slices':>7}{'recall':>9}{'mean IoU':>10}{'det@0.5':>9}")
+    for name, s in by_size.items():
+        print(f"  {name:<22}{s['n']:>7}{s['recall']:>9.3f}{s['mean_iou']:>10.3f}{s['det_rate@0.5']:>9.3f}")
+    print("=" * 60)
+
     out_dir = cfg.paths.output_dir
     with open(out_dir / "metrics.json", "w") as f:
-        json.dump({"test": m, "checkpoint_epoch": state["epoch"], "n_test_patients": n_pat,
-                   "n_test_slices": len(test_ds)}, f, indent=2)
+        json.dump({"test": m, "test_by_tumor_size": by_size, "checkpoint_epoch": state["epoch"],
+                   "n_test_patients": n_pat, "n_test_slices": len(test_ds)}, f, indent=2)
 
     _save_figures(cfg, test_ds, out, out_dir / "figures")
     return m
+
+
+# Tumor-area buckets in pixels of the 128x128 slice (1 px ~ 3.5 mm^2 of brain).
+SIZE_BUCKETS = {"tiny (< 20 px)": (1, 20), "small (20-150 px)": (20, 150),
+                "medium (150-600 px)": (150, 600), "large (>= 600 px)": (600, 10**9)}
+
+
+def metrics_by_tumor_size(ds: TumorSliceDataset, out: dict, threshold: float) -> dict[str, dict]:
+    """Recall and localization quality of tumor slices, split by how large the tumor is.
+
+    Small tumors at the upper/lower edge of a lesion are much harder than large ones, so a single
+    average hides where the model actually fails.
+    """
+    idx = out["indices"].numpy()
+    area = ds.masks[idx].flatten(1).sum(1).numpy()
+    is_tumor = out["labels"].numpy() > 0.5
+    detected = out["probs"].numpy() >= threshold
+    ious = np.zeros(len(idx))
+    ious[is_tumor] = paired_iou(out["pred_boxes"][is_tumor], out["gt_boxes"][is_tumor]).numpy()
+
+    result = {}
+    for name, (lo, hi) in SIZE_BUCKETS.items():
+        sel = is_tumor & (area >= lo) & (area < hi)
+        n = int(sel.sum())
+        result[name] = {
+            "n": n,
+            "recall": float(detected[sel].mean()) if n else 0.0,
+            "mean_iou": float(ious[sel].mean()) if n else 0.0,
+            "det_rate@0.5": float((detected[sel] & (ious[sel] >= 0.5)).mean()) if n else 0.0,
+        }
+    return result
 
 
 def _save_figures(cfg: Config, ds: TumorSliceDataset, out: dict, fig_dir: Path) -> None:

@@ -71,11 +71,18 @@ def plot_prediction_grid(samples: list[dict], path: Path, threshold: float = 0.5
 def plot_training_curves(log_csv: Path, path: Path) -> None:
     """Plot loss and validation metrics per epoch from the training log CSV."""
     log = pd.read_csv(log_csv)
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+    fig, (ax1, ax3, ax2) = plt.subplots(1, 3, figsize=(17, 4))
     ax1.plot(log.epoch, log.train_loss, label="train")
     ax1.plot(log.epoch, log.val_loss, label="validation")
-    ax1.set(xlabel="epoch", ylabel="loss", title="Loss")
+    ax1.set(xlabel="epoch", ylabel="loss", title="Total loss")
     ax1.legend()
+
+    # Loss components show *which* task overfits (classification vs. box regression).
+    for part, color in [("cls", "tab:blue"), ("giou", "tab:green")]:
+        ax3.plot(log.epoch, log[f"train_{part}"], color=color, linestyle="--", label=f"train {part}")
+        ax3.plot(log.epoch, log[f"val_{part}"], color=color, label=f"val {part}")
+    ax3.set(xlabel="epoch", ylabel="loss", title="Loss components (train cls includes label smoothing)")
+    ax3.legend()
     for col in ["val_f1", "val_mean_iou", "val_det_rate@0.5"]:
         ax2.plot(log.epoch, log[col], label=col.replace("val_", ""))
     ax2.set(xlabel="epoch", ylabel="score", title="Validation metrics", ylim=(0, 1))
