@@ -21,8 +21,17 @@ from mri_tumor.visualize import plot_training_curves
 
 
 def model_selection_score(m: dict[str, float]) -> float:
-    """Single number used to pick the best epoch: equal weight to finding and to localizing tumors."""
+    """Combined score: equal weight to finding and to localizing tumors."""
     return 0.5 * m["f1"] + 0.5 * m["mean_iou"]
+
+
+def monitored_value(name: str, m: dict[str, float], val_loss: float) -> float:
+    """Validation quantity that drives checkpointing, LR reduction and early stopping (higher = better)."""
+    if name == "score":
+        return model_selection_score(m)
+    if name == "val_loss":
+        return -val_loss  # negate so that "higher is better" holds for every option
+    return m[name]  # e.g. mean_iou, f1, det_rate@0.5
 
 
 @torch.no_grad()
@@ -67,17 +76,52 @@ def build_optimizer(model, cfg: Config) -> torch.optim.Optimizer:
     ], weight_decay=t.weight_decay)
 
 
-def build_scheduler(optimizer, cfg: Config) -> torch.optim.lr_scheduler.LRScheduler:
-    """Linear warm-up for ``warmup_epochs``, then cosine decay to zero (stepped once per epoch)."""
-    warmup, total = cfg.train.get("warmup_epochs", 0), cfg.train.epochs
+class LRSchedule:
+    """Linear warm-up, then either a fixed cosine decay or validation-driven plateau reduction.
 
-    def factor(epoch: int) -> float:
-        if epoch < warmup:
-            return (epoch + 1) / (warmup + 1)
-        progress = (epoch - warmup) / max(1, total - warmup)
-        return 0.5 * (1 + math.cos(math.pi * progress))
+    * ``cosine``  - decays to zero over exactly ``epochs`` epochs. Stopping early cuts off the
+      low-LR tail, so it should be combined with a large ``patience``.
+    * ``plateau`` - multiplies the LR by ``lr_factor`` whenever the monitored validation metric has
+      not improved for ``lr_patience`` epochs. The low-LR fine-tuning phase then happens whenever
+      validation says the model has stalled, which is what makes early stopping safe to use.
+    """
 
-    return torch.optim.lr_scheduler.LambdaLR(optimizer, factor)
+    def __init__(self, optimizer, cfg: Config):
+        t = cfg.train
+        self.optimizer, self.kind = optimizer, t.get("scheduler", "cosine")
+        self.warmup, self.total = t.get("warmup_epochs", 0), t.epochs
+        self.base_lrs = [g["lr"] for g in optimizer.param_groups]
+        self.epoch = 0
+        if self.kind == "plateau":
+            # mode="max": monitored_value() is always "higher is better".
+            self.plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode="max", factor=t.lr_factor, patience=t.lr_patience,
+                threshold=t.get("min_delta", 0.0), threshold_mode="abs",
+                min_lr=[lr * t.get("min_lr_mult", 0.0) for lr in self.base_lrs])
+        elif self.kind != "cosine":
+            raise ValueError(f"unknown train.scheduler: {self.kind!r} (use 'cosine' or 'plateau')")
+        self._set_warmup_or_cosine()
+
+    def _set_warmup_or_cosine(self) -> None:
+        e = self.epoch
+        if e < self.warmup:
+            f = (e + 1) / (self.warmup + 1)
+        elif self.kind == "cosine":
+            f = 0.5 * (1 + math.cos(math.pi * (e - self.warmup) / max(1, self.total - self.warmup)))
+        elif e == self.warmup:
+            f = 1.0  # warm-up finished: hand the full base LR over to ReduceLROnPlateau
+        else:
+            return  # plateau phase: ReduceLROnPlateau owns the LR from here on
+        for g, lr in zip(self.optimizer.param_groups, self.base_lrs):
+            g["lr"] = lr * f
+
+    def step(self, metric: float) -> None:
+        """Call once per epoch, after validation, with the monitored value."""
+        self.epoch += 1
+        if self.kind == "plateau" and self.epoch > self.warmup:
+            self.plateau.step(metric)  # warm-up epochs are not counted against the plateau patience
+        else:
+            self._set_warmup_or_cosine()
 
 
 def train(cfg: Config) -> Path:
@@ -102,9 +146,11 @@ def train(cfg: Config) -> Path:
     loss_fn = build_loss(cfg, train=True)
     val_loss_fn = build_loss(cfg, train=False)
     optimizer = build_optimizer(model, cfg)
-    # Warm-up avoids wrecking the pretrained weights with large early updates; cosine decay then
-    # gives large steps early for fast progress and small steps late for fine box adjustment.
-    scheduler = build_scheduler(optimizer, cfg)
+    # Warm-up avoids wrecking the pretrained weights with large early updates; afterwards the LR is
+    # lowered when validation stalls (plateau) or along a fixed cosine curve, see LRSchedule.
+    scheduler = LRSchedule(optimizer, cfg)
+    monitor = cfg.train.get("monitor", "score")
+    min_delta = cfg.train.get("min_delta", 0.0)
 
     print("=" * 78)
     print(f"Device            : {device}")
@@ -113,17 +159,18 @@ def train(cfg: Config) -> Path:
           f"{len(train_ds)} / {len(val_ds)} slices "
           f"({int(train_ds.labels.sum())} / {int(val_ds.labels.sum())} with tumor)")
     print(f"Batches per epoch : {len(train_loader)} (batch size {cfg.train.batch_size})")
-    print(f"Epochs            : up to {cfg.train.epochs} (early stopping patience {cfg.train.patience})")
+    print(f"Epochs            : up to {cfg.train.epochs} | LR schedule {scheduler.kind} | "
+          f"early stopping on val {monitor} (patience {cfg.train.patience}, min delta {min_delta})")
     print("=" * 78)
 
     log_path = log_dir / "train_log.csv"
     fields = ["epoch", "lr", "train_loss", "train_cls", "train_l1", "train_giou", "val_loss",
               "val_cls", "val_l1", "val_giou", "val_accuracy", "val_precision", "val_recall", "val_f1", "val_mean_iou", "val_det_rate@0.5",
-              "score", "seconds"]
+              "score", "monitor", "seconds"]
     with open(log_path, "w", newline="") as f:
         csv.writer(f).writerow(fields)
 
-    best_score, best_epoch, epochs_no_improve = -1.0, 0, 0
+    best_value, best_epoch, epochs_no_improve = -math.inf, 0, 0
     best_path = ckpt_dir / "best.pt"
     t_start = time.time()
 
@@ -150,18 +197,20 @@ def train(cfg: Config) -> Path:
                            f"L1 {running['l1'] / step:.4f}, GIoU {running['giou'] / step:.3f})")
         train_parts = {k: v / len(train_loader) for k, v in running.items()}
         lr = optimizer.param_groups[-1]["lr"]  # learning rate of the new layers (backbone uses a multiple)
-        scheduler.step()
 
         # ---------------- validation ----------------
         val = run_inference(model, val_loader, device, val_loss_fn)
         vp = val["loss_parts"]
         m = detection_metrics(val["probs"], val["labels"], val["pred_boxes"], val["gt_boxes"], cfg.train.cls_threshold)
         score = model_selection_score(m)
+        value = monitored_value(monitor, m, val["loss"])
+        scheduler.step(value)
         seconds = time.time() - t0
 
-        improved = score > best_score
+        # The same validation quantity picks the checkpoint, lowers the LR and stops training.
+        improved = value > best_value + min_delta
         if improved:
-            best_score, best_epoch, epochs_no_improve = score, epoch, 0
+            best_value, best_epoch, epochs_no_improve = value, epoch, 0
             torch.save({"model": model.state_dict(), "config": dict(cfg), "epoch": epoch, "val_metrics": m}, best_path)
         else:
             epochs_no_improve += 1
@@ -172,21 +221,23 @@ def train(cfg: Config) -> Path:
               f"train loss {train_parts['loss']:.4f} | val loss {val['loss']:.4f} "
               f"(cls {vp['cls']:.3f}, L1 {vp['l1']:.4f}, GIoU {vp['giou']:.3f}) | "
               f"acc {m['accuracy']:.3f} F1 {m['f1']:.3f} | mIoU {m['mean_iou']:.3f} "
-              f"det@0.5 {m['det_rate@0.5']:.3f}" + ("  <- best, saved" if improved else ""))
+              f"det@0.5 {m['det_rate@0.5']:.3f}" + ("  <- best, saved" if improved
+                                                     else f"  (no improvement {epochs_no_improve}/{cfg.train.patience})"))
 
         with open(log_path, "a", newline="") as f:
             csv.writer(f).writerow([epoch, lr, train_parts["loss"], train_parts["cls"], train_parts["l1"],
                                     train_parts["giou"], val["loss"], vp["cls"], vp["l1"], vp["giou"],
                                     m["accuracy"], m["precision"],
-                                    m["recall"], m["f1"], m["mean_iou"], m["det_rate@0.5"], score, seconds])
+                                    m["recall"], m["f1"], m["mean_iou"], m["det_rate@0.5"], score, value, seconds])
 
         if epochs_no_improve >= cfg.train.patience:
-            print(f"Early stopping: no improvement for {cfg.train.patience} epochs.")
+            print(f"Early stopping: val {monitor} has not improved by more than {min_delta} "
+                  f"for {cfg.train.patience} epochs.")
             break
 
     plot_training_curves(log_path, fig_dir / "training_curves.png")
     print("=" * 78)
     print(f"Training finished in {(time.time() - t_start) / 60:.1f} min. "
-          f"Best epoch {best_epoch} (score {best_score:.3f}) -> {best_path}")
+          f"Best epoch {best_epoch} (val {monitor} {best_value:.4f}) -> {best_path}")
     print(f"Log: {log_path} | curves: {fig_dir / 'training_curves.png'}")
     return best_path

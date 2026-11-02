@@ -12,8 +12,10 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
-GT_COLOR = "#2ecc71"    # green: ground truth
-PRED_COLOR = "#e74c3c"  # red: model prediction
+# Yellow vs. red stays distinguishable for red-green color blindness (deuteranopia / protanopia):
+# the two also differ strongly in brightness, and ground truth is dashed while predictions are solid.
+GT_COLOR = "#ffd700"    # yellow: ground truth
+PRED_COLOR = "#e8000b"  # red: model prediction
 
 
 def _draw_box(ax, box, size: int, color: str, style: str = "-") -> None:
@@ -24,7 +26,7 @@ def _draw_box(ax, box, size: int, color: str, style: str = "-") -> None:
 
 def plot_prediction_grid(samples: list[dict], path: Path, threshold: float = 0.5, title: str = "",
                          show_predictions: bool = True) -> None:
-    """Save a grid of slices with ground-truth (green, dashed) and predicted (red) boxes.
+    """Save a grid of slices with ground-truth (yellow, dashed) and predicted (red, solid) boxes.
 
     Each sample dict needs: image (H, W), label, gt_box, patient, slice and, when
     ``show_predictions`` is set, prob and pred_box. The predicted box is only drawn when the

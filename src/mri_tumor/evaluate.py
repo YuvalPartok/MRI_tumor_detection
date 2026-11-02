@@ -118,5 +118,5 @@ def _save_figures(cfg: Config, ds: TumorSliceDataset, out: dict, fig_dir: Path) 
             })
         path = fig_dir / f"test_predictions_{k + 1}.png"
         plot_prediction_grid(samples, path, cfg.train.cls_threshold,
-                             title="Test set - green dashed: ground truth, red: model prediction")
+                             title="Test set - yellow dashed: ground truth, red solid: model prediction")
         print(f"Saved {path}")

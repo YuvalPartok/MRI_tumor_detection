@@ -28,6 +28,10 @@ class Config(dict):
         except KeyError as err:
             raise AttributeError(f"Config has no key '{name}'") from err
 
+    def __setattr__(self, name: str, value: Any) -> None:
+        # Store as a key, so overrides like ``cfg.train.epochs = 5`` are visible to .get() and dict(cfg).
+        self[name] = value
+
     @classmethod
     def from_dict(cls, data: dict) -> "Config":
         return cls({k: cls.from_dict(v) if isinstance(v, dict) else v for k, v in data.items()})

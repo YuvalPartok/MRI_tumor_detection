@@ -35,15 +35,24 @@ model:
   dropout: 0.5                       # dropout before the prediction heads (strong, the head is the part that overfits)
 
 train:
-  epochs: 30                         # number of epochs (the cosine learning-rate schedule spans all of them)
+  epochs: 60                         # maximum number of epochs (early stopping usually ends training sooner)
   batch_size: 32
   lr: 0.0003                         # AdamW learning rate of the new layers (neck + heads)
   backbone_lr_mult: 0.2              # pretrained backbone learns 5x slower -> stays close to its general ImageNet features
   weight_decay: 0.05                 # AdamW weight decay (L2-style regularization)
   label_smoothing: 0.05              # soften 0/1 tumor labels to 0.025/0.975 -> discourages over-confident predictions
-  warmup_epochs: 2                   # linear learning-rate warm-up before the cosine decay
-  patience: 30                       # early stopping patience in epochs (>= epochs disables it: the cosine schedule
-                                     # needs its low-LR tail; the best checkpoint is kept regardless)
+  warmup_epochs: 2                   # linear learning-rate warm-up before the main schedule
+  # --- validation-driven schedule & early stopping -------------------------------------------
+  monitor: mean_iou                  # val metric that picks the best checkpoint, lowers the LR and stops training:
+                                     # mean_iou | score (0.5*F1 + 0.5*mean IoU) | f1 | det_rate@0.5 | val_loss
+  min_delta: 0.002                   # an epoch only counts as an improvement if the monitor rises by more than this
+  scheduler: plateau                 # plateau: lower the LR when the monitor stalls | cosine: fixed decay over `epochs`
+  lr_factor: 0.3                     # plateau: multiply the LR by this when the monitor stalls...
+  lr_patience: 3                     # ...for this many epochs
+  min_lr_mult: 0.01                  # plateau: never go below 1% of the starting LR
+  patience: 10                       # early stopping: stop after this many epochs without improvement. Keep it well
+                                     # above lr_patience so the model gets 2-3 LR reductions before giving up
+                                     # (with scheduler: cosine, set patience >= epochs: stopping cuts off the low-LR tail)
   num_workers: 0                     # DataLoader workers (0 is safest/fastest on macOS for in-memory data)
   log_interval: 20                   # print running loss every N batches
   cls_loss_weight: 1.0               # weight of the "is there a tumor?" loss

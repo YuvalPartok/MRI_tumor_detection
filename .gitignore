@@ -1,6 +1,6 @@
 # Data and generated artifacts (large / license-bound; reproducible with the scripts)
-data/
-outputs/
+/data/
+/outputs/
 
 # Python
 __pycache__/

@@ -3,7 +3,7 @@
 A compact deep-learning pipeline that reads brain MRI scans, decides for every axial slice whether it contains a **glioma**, and draws a **bounding box** around the tumor. It covers the full workflow: downloading the data, preprocessing, a patient-level data split, training, evaluation and visualization. The model is small enough to train on a MacBook in about 11 minutes.
 
 ![Test-set predictions](assets/test_predictions.png)
-*Held-out test patients. Green dashed box is the radiologist-derived ground truth; red box is the model prediction.*
+*Held-out test patients. Yellow dashed box is the radiologist-derived ground truth; red solid box is the model prediction. The yellow/red pair (plus dashed vs. solid lines) stays readable for red-green color-blind viewers.*
 
 ---
 
@@ -79,7 +79,8 @@ NIfTI volume (240x240x155)
 | Box head | Flattened 4×4 feature map, not global pooling | Global pooling throws away *where* things are, which is exactly what box regression needs. |
 | Loss | BCE + SmoothL1 + GIoU | BCE trains the classifier. L1 gets the coordinates right. GIoU optimizes overlap directly and still has a gradient when the boxes don't overlap. Box terms apply only to tumor slices. |
 | Augmentation | Flip, rotation, zoom, shift, brightness/contrast | Applied to the image **and** its mask together, then the box is recomputed from the augmented mask, so it always stays aligned. |
-| Model selection | Best validation score `0.5·F1 + 0.5·mean IoU`, early stopping | Rewards finding tumors and localizing them equally. |
+| LR schedule | 2-epoch warm-up, then **reduce-on-plateau**: LR × 0.3 when validation mean IoU stalls for 3 epochs | The model gets its low-LR fine-tuning phase when validation says it has stalled. A fixed cosine schedule only does that at a pre-chosen final epoch. |
+| Early stopping & model selection | Monitor **validation mean IoU**. Keep the best checkpoint, and stop after 10 epochs with no gain above 0.002, at most 60 epochs | IoU is the weakest metric, so it decides when to stop. Patience 10 is above the LR patience of 3, so the model gets 2–3 LR drops before training ends. |
 
 Metrics reported on the held-out test patients:
 
@@ -93,6 +94,7 @@ Metrics reported on the held-out test patients:
 
 ```
 ├── configs/config.yaml          # every hyperparameter and path, commented
+├── notebooks/colab_train.ipynb  # train + evaluate on a Google Colab GPU
 ├── scripts/                     # command-line entry points
 │   ├── download_data.sh         # installs the Aspera CLI if needed, then downloads
 │   ├── download_data.py
@@ -110,7 +112,7 @@ Metrics reported on the held-out test patients:
 │   ├── models/detector.py       # TumorDetector
 │   ├── losses.py                # detection loss
 │   ├── metrics.py               # classification + IoU metrics
-│   ├── train.py                 # training loop, logging, checkpointing, early stopping
+│   ├── train.py                 # training loop, LR schedule, checkpointing, early stopping
 │   ├── evaluate.py              # test metrics + prediction figures
 │   └── visualize.py             # plotting helpers
 ├── assets/                      # figures shown in this README
@@ -143,6 +145,16 @@ python scripts/train.py
 python scripts/evaluate.py --show
 ```
 
+### Training on Google Colab
+
+[`notebooks/colab_train.ipynb`](notebooks/colab_train.ipynb) runs the same scripts on a Colab GPU:
+
+1. Upload your local `data/processed/` folder, about 100 MB, to `MyDrive/MRI_tumor_identification/data/processed/`. This keeps the patient split identical to local runs.
+2. Open the notebook in Colab (*File → Open notebook → GitHub*) and pick a GPU runtime.
+3. Run all cells.
+
+The notebook clones the repo, writes `configs/colab.yaml` with outputs pointing to Drive, then trains, evaluates and displays the metrics and figures. Checkpoints and logs are saved to `MyDrive/MRI_tumor_identification/outputs/<RUN_NAME>/`, so they survive a disconnect.
+
 ### About the download
 
 TCIA distributes the UTSW-Glioma images only through **IBM Aspera**. The full collection is 22.9 GB.
@@ -162,6 +174,16 @@ Every tunable value is in [`configs/config.yaml`](configs/config.yaml), with a c
 ```bash
 python scripts/train.py --config configs/my_experiment.yaml
 ```
+
+Early stopping is controlled in the `train:` section:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `monitor` | `mean_iou` | Validation metric that picks the checkpoint, lowers the LR and stops training. Options: `mean_iou`, `score` (0.5·F1 + 0.5·IoU), `f1`, `det_rate@0.5`, `val_loss`. |
+| `min_delta` | `0.002` | The smallest gain that counts as an improvement. |
+| `scheduler` | `plateau` | `plateau` lowers the LR when the monitored metric stalls. `cosine` uses a fixed decay over `epochs`; in that case set `patience >= epochs`, because stopping early would cut off the low-LR tail. |
+| `lr_factor`, `lr_patience` | `0.3`, `3` | Multiply the LR by `lr_factor` after `lr_patience` epochs without improvement. |
+| `patience` | `10` | Stop after this many epochs without improvement. |
 
 ---
 
